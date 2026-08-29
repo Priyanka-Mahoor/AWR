@@ -1,0 +1,11 @@
+opencv-python>=4.8
+mediapipe==0.10.14
+protobuf==4.25.3
+numpy>=1.24
+Pillow>=10.0
+# Training only (optional):
+# tensorflow>=2.15
+# tensorflow-datasets>=4.9
+# importlib_resources>=6.0
+SpeechRecognition>=3.10.4
+PyAudio>=0.2.14

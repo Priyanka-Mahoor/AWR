@@ -1,0 +1,8 @@
+w0	kernel	(3, 3, 1, 32)
+w1	bias	(32,)
+w2	kernel	(3, 3, 32, 64)
+w3	bias	(64,)
+w4	kernel	(1600, 128)
+w5	bias	(128,)
+w6	kernel	(128, 36)
+w7	bias	(36,)

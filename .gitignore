@@ -1,0 +1,21 @@
+# Teach/Fix samples and generated character crops
+data/
+
+# Local TensorFlow training environment
+.train_venv/
+
+# Local app runtime environment
+.venv/
+
+# Python junk
+__pycache__/
+*.pyc
+*.pyo
+
+# Local installers and test leftovers
+*.whl
+tests/_tmp_export/
+
+# Downloaded Vosk speech model (large)
+models/vosk-model-small-en-us-0.15/
+models/vosk-model-small-en-us-0.15.zip
