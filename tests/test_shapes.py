@@ -103,6 +103,28 @@ class ClassifyMaskTests(unittest.TestCase):
         self.assertIsNotNone(hit)
         self.assertEqual(hit.name, "Star")
 
+    def test_shallow_air_star_is_star_not_pentagon(self) -> None:
+        mask = _blank(540)
+        cv2.polylines(mask, [_star_pts(270, 270, 180, 110)], True, 255, 10)
+        hit = classify_mask(mask)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.name, "Star")
+        self.assertNotEqual(hit.name, "Pentagon")
+
+    def test_regular_pentagon_is_still_pentagon(self) -> None:
+        mask = _blank()
+        pts = np.array(
+            [
+                [120 + int(70 * np.cos(a)), 120 + int(70 * np.sin(a))]
+                for a in np.linspace(-np.pi / 2, 1.5 * np.pi, 6)[:-1]
+            ],
+            dtype=np.int32,
+        )
+        cv2.polylines(mask, [pts], True, 255, 4)
+        hit = classify_mask(mask)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.name, "Pentagon")
+
     def test_heart_is_heart(self) -> None:
         mask = _blank()
         cv2.polylines(mask, [_heart_pts(120, 120, 5.2)], True, 255, 3)

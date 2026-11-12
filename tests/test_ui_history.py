@@ -65,6 +65,7 @@ class StoredOutputVisibleTests(unittest.TestCase):
         self.assertNotIn("Undo Last", labels)
         self.assertNotIn("Clear Canvas", labels)
         self.assertNotIn("Clear", labels)
+        self.assertIn("OCR: OFF", labels)
         for btn in (self.ui._undo_btn, self.ui._clear_canvas_btn):
             self.assertTrue(bool(btn.winfo_ismapped()), f"{btn.cget('text')} is not mapped")
             bottom_y = int(btn.winfo_rooty()) + int(btn.winfo_height())
@@ -115,6 +116,18 @@ class StoredOutputVisibleTests(unittest.TestCase):
         self.assertNotIn("[Text]", body)
         self.assertNotIn("[Shape]", body)
 
+    def test_text_mode_output_is_text_only(self) -> None:
+        import cv2
+        import numpy as np
+
+        rgb = np.full((40, 80, 3), 255, dtype=np.uint8)
+        ok, buf = cv2.imencode(".png", rgb)
+        self.assertTrue(ok)
+        self.ui.set_history([("HELLO WORLD", "word", buf.tobytes())])
+        body = self.ui._out.get("1.0", tk.END)
+        self.assertIn("HELLO WORLD", body)
+        self.assertFalse(self.ui._out.image_names())
+
     def test_text_draw_and_voice_panels_do_not_mix(self) -> None:
         self.ui.set_history([("HELLO", "word", None)])
         self.assertIn("HELLO", self.ui._out.get("1.0", tk.END))
@@ -131,6 +144,13 @@ class StoredOutputVisibleTests(unittest.TestCase):
 
     def test_canvas_title_is_air_writing(self) -> None:
         self.assertEqual(str(self.ui._canvas_title.cget("text")), "AIR WRITING")
+
+    def test_text_mode_hides_index_finger_tip(self) -> None:
+        self.ui.root.update_idletasks()
+        self.assertFalse(
+            bool(self.ui._canvas_tip.winfo_ismapped()),
+            "writing tip overlay should be hidden in Text mode",
+        )
 
     def test_live_tracking_pill_is_removed(self) -> None:
         self.assertIsNone(getattr(self.ui, "_live_pill", None))

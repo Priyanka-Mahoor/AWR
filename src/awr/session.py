@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 
 
 CONFIDENCE_MIN = 0.55
-# Pen-up this long after finishing the word → segment + OCR + commit
-WORD_IDLE_SEC = 3.0
+# Pen-up this long after finishing the word → recognize
+WORD_IDLE_SEC = 2.0
 # Pen-up this long after finishing a drawing → classify the shape
 SHAPE_IDLE_SEC = 2.0
 
@@ -24,7 +24,7 @@ class Session:
     mode: str = "text"  # "text" | "draw" | "voice"
     current_word: str = ""
     history: list[HistoryItem] = field(default_factory=list)
-    status: str = "Write a word; leave gaps between letters; pen-up 3s to recognize"
+    status: str = "Write a word; leave gaps between letters; lift 2s to recognize"
     last_activity: float = 0.0
     auto_recognize: bool = True
     use_ocr_space: bool = False
@@ -36,7 +36,7 @@ class Session:
         self.mode = mode
         if mode == "text":
             self.status = (
-                "Text mode — write word, pen-up 3s to recognize. Output stays until Clr text."
+                "Text mode — write a word, lift 2s to recognize. Output stays until Clr text."
             )
         elif mode == "draw":
             self.status = (
@@ -87,7 +87,9 @@ class Session:
         word = "".join(c for c, _ in results)
         weak = sum(1 for _, p in results if p < CONFIDENCE_MIN)
         conf_bits = " ".join(f"{c}:{p:.0%}" for c, p in results)
-        if weak:
+        if n == 1:
+            self.status = f"Committed: {word}"
+        elif weak:
             self.status = f"Committed: {word} ({n} letters, {conf_bits})"
         else:
             self.status = f"Committed: {word} ({n} letters)"
@@ -95,6 +97,32 @@ class Session:
         self.current_word = word
         self.history_seq += 1
         return word
+
+    def commit_recognized_words(
+        self,
+        words: list[str],
+        now: float,
+        image_png: bytes | None = None,
+    ) -> str | None:
+        """Append OCR text to history. Keep earlier rows and the ink snapshot."""
+        cleaned = [w for w in (word.strip() for word in words) if w]
+        if not cleaned:
+            if image_png is None:
+                self.last_activity = now
+                self.status = "unclear / empty stroke"
+                return None
+            cleaned = ["(unclear)"]
+        self.last_activity = now
+        for word in cleaned:
+            self.history.append(
+                HistoryItem(text=word, kind="word", image_png=image_png)
+            )
+        phrase = " ".join(cleaned)
+        self.current_word = phrase
+        n = len(cleaned)
+        self.status = f"Committed: {phrase}" + (f" ({n} words)" if n > 1 else "")
+        self.history_seq += 1
+        return phrase
 
     def commit_recognized_shape(
         self, name: str, now: float, image_png: bytes | None = None

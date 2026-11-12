@@ -23,6 +23,8 @@ class LetterGlyph:
     geometry: dict
     x0: int = 0
     x1: int = 0
+    y0: int = 0
+    y1: int = 0
 
 
 class InkCanvas:
@@ -139,28 +141,43 @@ class InkCanvas:
         return canvas
 
     def to_ocr_png(self) -> bytes | None:
-        """Black ink on white PNG for OCR.space (upscaled crop)."""
-        mask = self._raster(thickness=max(10, self.width_px + 6), dilate=True)
+        """Black ink on white PNG for OCR.space (fits free 1000px limit)."""
+        mask = self._raster(thickness=max(14, self.width_px + 12), dilate=False)
         if mask is None:
             return None
         ys, xs = np.where(mask > 0)
         if len(xs) == 0:
             return None
-        pad = 24
+        pad = 72
         h, w = mask.shape
         x0 = max(0, int(xs.min()) - pad)
         y0 = max(0, int(ys.min()) - pad)
         x1 = min(w, int(xs.max()) + pad + 1)
         y1 = min(h, int(ys.max()) + pad + 1)
         crop = mask[y0:y1, x0:x1]
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        crop = cv2.dilate(crop, kernel, iterations=1)
         # OCR wants dark text on a light page
         page = np.full_like(crop, 255)
         page[crop > 0] = 0
-        # Upscale small air-writing crops so the API has enough pixels
+        # Free OCR.space Engine 3 rejects images larger than 1000px.
         ph, pw = page.shape
-        scale = max(3.0, 480 / max(pw, 1), 240 / max(ph, 1))
-        nw, nh = max(64, int(pw * scale)), max(64, int(ph * scale))
-        page = cv2.resize(page, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        longest = max(pw, ph, 1)
+        max_side = 1000
+        min_side = 640
+        scale = max(min_side / longest, 1.0)
+        if longest * scale > max_side:
+            scale = max_side / longest
+        nw = max(32, int(round(pw * scale)))
+        nh = max(32, int(round(ph * scale)))
+        if max(nw, nh) > max_side:
+            clamp = max_side / max(nw, nh)
+            nw = max(32, int(nw * clamp))
+            nh = max(32, int(nh * clamp))
+        interp = cv2.INTER_CUBIC if scale >= 1.0 else cv2.INTER_AREA
+        page = cv2.resize(page, (nw, nh), interpolation=interp)
+        # Keep faint cubic-resized strokes (127 was wiping thin air writing).
+        _, page = cv2.threshold(page, 240, 255, cv2.THRESH_BINARY)
         rgb = cv2.cvtColor(page, cv2.COLOR_GRAY2BGR)
         ok, buf = cv2.imencode(".png", rgb)
         if not ok:
@@ -484,6 +501,23 @@ class InkCanvas:
     def _strokes_in_x_range(self, x0: int, x1: int) -> list[Stroke]:
         return self._strokes_overlapping_x(x0, x1)
 
+    def _ink_y_span(self, mask: np.ndarray, x0: int, x1: int) -> tuple[int, int]:
+        """Ink min/max y in [x0, x1) on a raster mask."""
+        px0 = max(0, x0)
+        px1 = min(mask.shape[1], x1)
+        if px1 <= px0:
+            return 0, 0
+        ys = np.where(np.any(mask[:, px0:px1] > 0, axis=1))[0]
+        if ys.size == 0:
+            return 0, 0
+        return int(ys[0]), int(ys[-1]) + 1
+
+    def _ink_x_span(self, mask: np.ndarray) -> tuple[int, int]:
+        xs = np.where(np.any(mask > 0, axis=0))[0]
+        if xs.size == 0:
+            return 0, mask.shape[1]
+        return int(xs[0]), int(xs[-1]) + 1
+
     def letter_glyphs(self, merge_h: bool = True) -> list[LetterGlyph]:
         """Split word ink into left→right letter images using spatial gaps."""
         thick = self._raster(dilate=True)
@@ -496,7 +530,18 @@ class InkCanvas:
             img = self._mask_to_emnist(thick)
             if img is None:
                 return []
-            return [LetterGlyph(image=img, geometry=self.stroke_geometry(), x0=0, x1=self.width)]
+            gx0, gx1 = self._ink_x_span(thick)
+            gy0, gy1 = self._ink_y_span(thick, gx0, gx1)
+            return [
+                LetterGlyph(
+                    image=img,
+                    geometry=self.stroke_geometry(),
+                    x0=gx0,
+                    x1=gx1,
+                    y0=gy0,
+                    y1=gy1,
+                )
+            ]
 
         glyphs: list[LetterGlyph] = []
         for x0, x1 in ranges:
@@ -511,7 +556,8 @@ class InkCanvas:
             if img is None:
                 continue
             geom = self.stroke_geometry(self._strokes_overlapping_x(x0, x1))
-            glyphs.append(LetterGlyph(image=img, geometry=geom, x0=x0, x1=x1))
+            y0, y1 = self._ink_y_span(thick, x0, x1)
+            glyphs.append(LetterGlyph(image=img, geometry=geom, x0=x0, x1=x1, y0=y0, y1=y1))
         if merge_h:
             return self._collapse_split_h_glyphs(glyphs)
         return glyphs
@@ -548,7 +594,10 @@ class InkCanvas:
                     mask[:, px0:px1] = thick[:, px0:px1]
                     img = self._mask_to_emnist(mask)
                     if img is not None:
-                        out.append(LetterGlyph(image=img, geometry=geom, x0=x0, x1=x1))
+                        y0, y1 = self._ink_y_span(thick, x0, x1)
+                        out.append(
+                            LetterGlyph(image=img, geometry=geom, x0=x0, x1=x1, y0=y0, y1=y1)
+                        )
                         i += 2
                         continue
             out.append(glyphs[i])

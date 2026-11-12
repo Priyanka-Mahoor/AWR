@@ -205,8 +205,12 @@ def _deep_defect_count(cnt: np.ndarray, peri: float) -> int:
 
 
 def _is_star(solidity: float, raw_verts: int, defects: int, hull_verts: int) -> bool:
-    if solidity >= 0.82:
+    if solidity >= 0.92:
         return False
+    # A 5-point star's convex hull is a pentagon; the dents keep extra vertices.
+    # Shallow air-drawn stars often have no deep defects after morphological close.
+    if hull_verts == 5 and raw_verts >= 8 and solidity <= 0.88:
+        return True
     if defects >= 4 and solidity <= 0.75:
         return True
     if raw_verts >= 8 and solidity <= 0.76:

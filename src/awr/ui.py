@@ -66,6 +66,7 @@ class AppUI:
 
         self._photo = None
         self._mode = "text"
+        self._ocr_enabled = False
         self._color_bgr = COLORS[0][1]
         self._on_mode = on_mode
         self._on_color = on_color
@@ -111,8 +112,10 @@ class AppUI:
         self._rail_btn(self._write_tools, "Read", on_read).pack(side=tk.LEFT, padx=6)
         self._ocr_btn = self._rail_btn(self._write_tools, "OCR: OFF", on_toggle_ocr)
         self._ocr_btn.pack(side=tk.LEFT, padx=6)
-        self._rail_btn(self._write_tools, "Teach", on_teach).pack(side=tk.LEFT, padx=6)
-        self._rail_btn(self._write_tools, "Fix", on_fix).pack(side=tk.LEFT, padx=6)
+        self._teach_btn = self._rail_btn(self._write_tools, "Teach", on_teach)
+        self._teach_btn.pack(side=tk.LEFT, padx=6)
+        self._fix_btn = self._rail_btn(self._write_tools, "Fix", on_fix)
+        self._fix_btn.pack(side=tk.LEFT, padx=6)
         self._write_tools.pack(side=tk.LEFT)
         self._rail_btn(actions, "Save TXT", on_save_txt).pack(side=tk.LEFT, padx=6)
         self._rail_btn(actions, "Save PDF", on_save_pdf).pack(side=tk.LEFT, padx=6)
@@ -135,14 +138,15 @@ class AppUI:
         latest_row = tk.Frame(body, bg=STRIP)
         latest_row.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
         self.word_var = tk.StringVar(value=" ")
-        tk.Label(
+        self._word_label = tk.Label(
             latest_row,
             textvariable=self.word_var,
             fg=CYAN,
             bg=STRIP,
             font=("Segoe UI", 28, "bold"),
             anchor="w",
-        ).pack(anchor="w")
+        )
+        self._word_label.pack(anchor="w")
         self.thumb = tk.Label(
             latest_row,
             bg=CARD,
@@ -165,7 +169,9 @@ class AppUI:
             anchor="w",
         )
         self._out_title.pack(fill=tk.X, pady=(0, 6))
-        self._out = self._make_output_text(self._text_wrap)
+        self._out = self._make_output_text(
+            self._text_wrap, font=("Segoe UI", 18, "bold")
+        )
         self._out.insert("1.0", "No stored text yet. Write a word — it stays listed here.", "hint")
 
         self._draw_wrap = tk.Frame(out_wrap, bg=STRIP)
@@ -206,14 +212,13 @@ class AppUI:
         self._canvas_title.place(x=16, y=12, anchor="nw")
         self._canvas_tip = tk.Label(
             self._stage,
-            text="Tip: Raise your index finger to write. Lift your hand to stop.",
+            text="Tip: Draw a star, heart, circle, square, triangle, or line. Hold 2s.",
             fg=TEXT,
             bg="#152044",
             font=("Segoe UI", 10),
             padx=14,
             pady=7,
         )
-        self._canvas_tip.place(relx=0.5, rely=1.0, x=0, y=-14, anchor="s")
 
         # Tool rail floats on the camera (hidden in Voice — modes live in the header).
         self._rail = tk.Frame(
@@ -410,7 +415,9 @@ class AppUI:
             highlightbackground=BORDER,
         )
 
-    def _make_output_text(self, parent: tk.Widget) -> tk.Text:
+    def _make_output_text(
+        self, parent: tk.Widget, font: tuple[str, int, str] = ("Segoe UI", 18, "bold")
+    ) -> tk.Text:
         out_frame = tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
         out_frame.pack(fill=tk.BOTH, expand=True)
         scroll = tk.Scrollbar(out_frame, bg=STRIP, troughcolor=CARD, highlightthickness=0)
@@ -420,7 +427,7 @@ class AppUI:
             bg=CARD,
             fg=TEXT,
             insertbackground=CARD,
-            font=("Segoe UI", 18, "bold"),
+            font=font,
             wrap=tk.WORD,
             height=6,
             bd=0,
@@ -657,7 +664,11 @@ class AppUI:
 
     def _lift_overlays(self) -> None:
         self._canvas_title.lift()
-        self._canvas_tip.lift()
+        try:
+            if self._canvas_tip.winfo_ismapped():
+                self._canvas_tip.lift()
+        except tk.TclError:
+            pass
         self._rail.lift()
 
     def _tick_wave(self) -> None:
@@ -725,16 +736,15 @@ class AppUI:
             self._text_wrap.pack_forget()
             self._draw_wrap.pack(fill=tk.BOTH, expand=True)
             self.thumb.pack(anchor="w", pady=(8, 0))
+            self._canvas_tip.place(relx=0.5, rely=1.0, x=0, y=-14, anchor="s")
             self._canvas_tip.configure(
                 text="Tip: Draw a star, heart, circle, square, triangle, or line. Hold 2s."
             )
         else:
+            self._canvas_tip.place_forget()
             self._draw_wrap.pack_forget()
             self._text_wrap.pack(fill=tk.BOTH, expand=True)
             self.thumb.pack_forget()
-            self._canvas_tip.configure(
-                text="Tip: Raise your index finger to write. Lift your hand to stop."
-            )
         self._lift_overlays()
 
     def _refresh_color_buttons(self) -> None:
@@ -797,7 +807,10 @@ class AppUI:
     def set_history(self, rows: list[tuple[str, str, bytes | None]]) -> None:
         kind = self._history_kind()
         rows = [(t, k, p) for t, k, p in rows if k == kind]
-        key = (self._mode, tuple((t, k, None if p is None else len(p)) for t, k, p in rows))
+        key = (
+            self._mode,
+            tuple((t, k, None if p is None else len(p)) for t, k, p in rows),
+        )
         if key == self._last_history_key:
             return
         self._last_history_key = key
@@ -820,7 +833,7 @@ class AppUI:
                     "voice" if item_kind == "voice" else "item"
                 )
                 panel.insert(tk.END, f"{i}. {label}\n", color_tag)
-                if png:
+                if png and item_kind != "word":
                     photo = self._png_to_photo(png, max_h=96)
                     if photo is not None:
                         photos.append(photo)
@@ -922,6 +935,7 @@ class AppUI:
             )
 
     def set_ocr_space(self, enabled: bool) -> None:
+        self._ocr_enabled = enabled
         if enabled:
             self._ocr_btn.configure(
                 text="OCR: ON",

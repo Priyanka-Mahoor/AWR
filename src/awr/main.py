@@ -10,7 +10,13 @@ from pathlib import Path
 from awr.export import write_pdf, write_txt
 from awr.ink import InkCanvas
 from awr.learn import save_samples, sample_count, model_status_line
-from awr.ocr_space import recognize_png_with_fallback
+from awr.ocr_dataset import ensure_letter_dataset, save_capture
+from awr.ocr_space import (
+    apply_written_case,
+    clean_ocr_text,
+    pick_fuller_text,
+    recognize_png_with_fallback,
+)
 from awr.recognizer import CharRecognizer, LABELS
 from awr.session import SHAPE_IDLE_SEC, WORD_IDLE_SEC, Session
 from awr.shapes import ShapeHit, classify_drawing, draw_shape_overlay
@@ -35,7 +41,7 @@ class App:
         self._lock = threading.Lock()
         self._pending_images: list = []
         self._pending_pred = ""
-        self._pending_whole = None
+        self._pending_ocr_png: bytes | None = None
         self._shape_hit: ShapeHit | None = None
         self._draw_committed = False
         self._sent_hist: tuple | None = None
@@ -45,6 +51,9 @@ class App:
         self._voice_commits: list[str] = []
         self._voice_error: str | None = None
         self._voice_status_msg: str | None = None
+        self._ocr_lock = threading.Lock()
+        self._ocr_api_lock = threading.Lock()
+        self._ocr_commits: list[tuple[list[str], str, bytes | None]] = []
 
         self.ui = AppUI(
             on_mode=self.set_mode,
@@ -63,7 +72,14 @@ class App:
             on_pause_voice=self.pause_voice,
         )
         self.ui.set_auto_recognize(True)
+        self.session.use_ocr_space = False
         self.ui.set_ocr_space(False)
+        try:
+            n = ensure_letter_dataset()
+            if n:
+                self.session.status = f"OCR dataset ready ({n} letter templates). Write, lift 2s."
+        except Exception:
+            pass
         self.voice = VoiceListener(
             on_live=self._on_voice_live,
             on_committed=self._on_voice_committed,
@@ -161,7 +177,7 @@ class App:
             on = self.session.auto_recognize
             self._pen_up_since = None
             if on:
-                self.session.status = "Auto-recognize ON — pen-up 3s to read"
+                self.session.status = "Auto-recognize ON — lift 2s to read"
             else:
                 self.session.status = "Auto-recognize OFF — click Teach or Read"
         self.ui.set_auto_recognize(on)
@@ -172,11 +188,9 @@ class App:
             self.session.use_ocr_space = not self.session.use_ocr_space
             on = self.session.use_ocr_space
             if on:
-                self.session.status = (
-                    "OCR.space ON — cloud OCR (free). Set OCR_SPACE_API_KEY for your key."
-                )
+                self.session.status = "OCR ON — capture + dataset + cloud OCR"
             else:
-                self.session.status = "OCR.space OFF — local CNN"
+                self.session.status = "OCR OFF — local CNN letters"
         self.ui.set_ocr_space(on)
         self.ui.set_status(self.session.status)
 
@@ -310,6 +324,9 @@ class App:
         with self._lock:
             self.text_ink.clear()
             self._pen_up_since = None
+            png = self._pending_ocr_png
+        if png:
+            save_capture(png, label)
         self.ui.set_status(f"Saved {n} sample(s). Total: {sample_count()}. Then run scripts/finetune_user.py")
 
     def fix(self) -> None:
@@ -355,44 +372,117 @@ class App:
         self._hist_seq = self.session.history_seq
         self.ui.set_history(self._history_rows())
         self.ui.set_status(self.session.status)
+        if self._pending_ocr_png:
+            save_capture(self._pending_ocr_png, label)
 
     def _finalize_word(self, now: float) -> None:
-        results: list[tuple[str, float]] = []
         glyphs = self.text_ink.letter_glyphs()
-        images = [g.image.copy() for g in glyphs]
-        ocr_note = ""
-        if self.session.use_ocr_space:
-            png = self.text_ink.to_ocr_png()
-            if png is not None:
-                try:
-                    raw, engine = recognize_png_with_fallback(png)
-                    cleaned = "".join(ch for ch in raw.upper() if ch in LABELS)
-                    if cleaned:
-                        results = [(ch, 0.95) for ch in cleaned]
-                        ocr_note = f" via OCR.space (engine {engine})"
-                    else:
-                        ocr_note = " OCR.space empty — using CNN"
-                except Exception as exc:  # noqa: BLE001
-                    ocr_note = f" OCR.space failed ({exc}) — using CNN"
-        if not results and self.recognizer.available:
-            for glyph in glyphs:
-                pred = self.recognizer.predict(glyph.image, geometry=glyph.geometry)
-                if pred is not None:
-                    results.append(pred)
-        word = self.session.commit_recognized_word(results, now)
-        if word is not None:
-            n_strokes = sum(1 for s in self.text_ink.strokes if len(s.points) >= 2)
-            if len(glyphs) <= 1 and n_strokes >= 3 and not self.session.use_ocr_space:
-                self.session.status += " — tip: wider gap between letters"
-            if ocr_note:
-                self.session.status += ocr_note
-            self._pending_images = images
-            self._pending_pred = word
-            self._pending_whole = self.text_ink.to_emnist()
-            self.text_ink.clear()
-        elif ocr_note:
-            self.session.status = (self.session.status or "unclear") + ocr_note
+        png = self.text_ink.to_ocr_png()
+        glyph_images = [g.image.copy() for g in glyphs]
+        geometries = [dict(g.geometry) for g in glyphs]
+        glyph_heights = [float(g.y1 - g.y0) for g in glyphs]
+        canvas_h = float(self.text_ink.height)
         self._pen_up_since = None
+        if png is None:
+            self.session.status = "Write a word on the canvas first"
+            return
+        store_png = self.text_ink.crop_png() or png
+        self._pending_images = glyph_images
+        self._pending_whole = self.text_ink.to_emnist()
+        self._pending_ocr_png = store_png
+        self.text_ink.clear()
+        if self.session.use_ocr_space:
+            self.session.status = "OCR reading English words…"
+            worker = threading.Thread(
+                target=self._cloud_ocr_worker,
+                args=(png, store_png, glyph_images, geometries, glyph_heights, canvas_h),
+                daemon=True,
+            )
+            worker.start()
+            return
+        words, note = self._local_word(
+            png, glyph_images, geometries, glyph_heights, canvas_h
+        )
+        phrase = self.session.commit_recognized_words(words, now)
+        if phrase and phrase != "(unclear)":
+            save_capture(store_png, phrase)
+            self._pending_pred = phrase
+        if note:
+            self.session.status += note
+
+    def _cnn_letters(
+        self,
+        glyph_images: list,
+        geometries: list,
+        glyph_heights: list[float],
+        canvas_h: float,
+    ) -> list[str]:
+        letters: list[str] = []
+        used_heights: list[float] = []
+        if self.recognizer.available:
+            for img, geo, height in zip(glyph_images, geometries, glyph_heights):
+                pred = self.recognizer.predict(img, geometry=geo)
+                if pred is not None:
+                    letters.append(pred[0])
+                    used_heights.append(height)
+        return apply_written_case(letters, used_heights, canvas_h)
+
+    def _local_word(
+        self,
+        png: bytes,
+        glyph_images: list,
+        geometries: list,
+        glyph_heights: list[float],
+        canvas_h: float,
+    ) -> tuple[list[str], str]:
+        letters = self._cnn_letters(glyph_images, geometries, glyph_heights, canvas_h)
+        if letters:
+            return ["".join(letters)], " via local CNN"
+        return [], ""
+
+    def _cloud_ocr_worker(
+        self,
+        png: bytes,
+        store_png: bytes | None,
+        glyph_images: list,
+        geometries: list,
+        glyph_heights: list[float],
+        canvas_h: float,
+    ) -> None:
+        words: list[str] = []
+        note = ""
+
+        def cnn_letters() -> list[str]:
+            return self._cnn_letters(glyph_images, geometries, glyph_heights, canvas_h)
+
+        try:
+            with self._ocr_api_lock:
+                raw, engine = recognize_png_with_fallback(png, language="eng")
+            letters = cnn_letters()
+            line = pick_fuller_text(raw, letters)
+            words = [line] if line else []
+            if words:
+                ocr_line = clean_ocr_text(raw)
+                if ocr_line and line == ocr_line:
+                    note = f" via OCR.space (engine {engine})"
+                elif words:
+                    note = " OCR short — used CNN letters"
+            else:
+                letters = cnn_letters()
+                if letters:
+                    words = ["".join(letters)]
+                    note = " OCR empty — used CNN letters"
+                else:
+                    note = " OCR.space empty — write larger / slower"
+        except Exception as exc:  # noqa: BLE001
+            letters = cnn_letters()
+            if letters:
+                words = ["".join(letters)]
+                note = f" OCR failed ({exc}) — used CNN letters"
+            else:
+                note = f" OCR.space failed ({exc})"
+        with self._ocr_lock:
+            self._ocr_commits.append((words, note, store_png or png))
 
     def _finalize_shape(self, now: float) -> None:
         mask = self.draw_ink.to_mask()
@@ -565,9 +655,10 @@ class App:
                     self.ui.set_word(item["word"])
                 if "history_rows" in item:
                     seq = int(item.get("history_seq") or 0)
-                    if seq > self._hist_seq:
-                        self._hist_seq = seq
-                        self.ui.set_history(item["history_rows"])
+                    rows = item.get("history_rows") or []
+                    if seq > self._hist_seq or (seq == self._hist_seq and rows):
+                        self._hist_seq = max(self._hist_seq, seq)
+                        self.ui.set_history(rows)
                 elif "transcript" in item:
                     self.ui.set_transcript(item["transcript"])
                 if "status" in item and self.voice.state == "stopped":
@@ -603,6 +694,28 @@ class App:
             self.ui.alert("Voice recognition", err)
         elif voice_status and self.voice.state != "stopped":
             self.ui.set_status(voice_status)
+        with self._ocr_lock:
+            ocr_commits = list(self._ocr_commits)
+            self._ocr_commits.clear()
+        for words, note, png in ocr_commits:
+            with self._lock:
+                phrase = self.session.commit_recognized_words(words, time.monotonic())
+                if phrase is None:
+                    self.session.status = (self.session.status or "unclear") + note
+                elif note:
+                    self.session.status += note
+                if phrase and phrase != "(unclear)" and png:
+                    save_capture(png, phrase)
+                    self._pending_pred = phrase
+                elif phrase:
+                    self._pending_pred = phrase
+                self._hist_seq = self.session.history_seq
+                status = self.session.status
+                shown = self.session.current_word
+            self.ui.set_word(shown or " ")
+            self.ui.set_history(self._history_rows())
+            if self.voice.state == "stopped":
+                self.ui.set_status(status)
         if not self._stop.is_set():
             self.ui.root.after(16, self._pump)
 
